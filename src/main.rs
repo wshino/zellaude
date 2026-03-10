@@ -54,6 +54,8 @@ impl ZellijPlugin for State {
                     if let Some(idx) = new_active {
                         self.clear_flashes_on_tab(idx);
                     }
+                    // Reset manual scroll when user switches tabs
+                    self.manual_scroll = false;
                 }
                 self.active_tab_index = new_active;
                 self.tabs = tabs;
@@ -105,6 +107,7 @@ impl ZellijPlugin for State {
                                         self.tab_scroll_offset += 1;
                                     }
                                 }
+                                self.manual_scroll = true;
                                 return true;
                             }
                         }

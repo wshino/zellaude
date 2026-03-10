@@ -169,14 +169,14 @@ pub fn render_status_bar(state: &mut State, _rows: usize, cols: usize) {
     // Render prefix segment (truncate if wider than cols)
     let mut col;
     if simplified {
-        // Simplified UI: flat style without powerline backgrounds
+        // Simplified UI: flat style, show mode only when not Normal
         let _ = write!(
             buf,
             "{bar_bg_str}{}{BOLD}{prefix_text}{RESET}{bar_bg_str}",
             fg(180, 175, 195),
         );
         col = prefix_width;
-        if col + mode_pill_width <= cols {
+        if state.input_mode != InputMode::Normal && col + mode_pill_width <= cols {
             let (mode_color, _) = mode_style(state.input_mode);
             let _ = write!(
                 buf,
@@ -491,12 +491,12 @@ fn render_tabs(
     }
 }
 
-/// Background for active tab in simplified mode (green tint)
-const SIMPLE_TAB_BG_ACTIVE: Color = (30, 65, 45);
-/// Background for inactive tab in simplified mode (subtle green)
-const SIMPLE_TAB_BG_INACTIVE: Color = (20, 38, 28);
+/// Background for active tab in simplified mode (light gray)
+const SIMPLE_TAB_BG_ACTIVE: Color = (85, 85, 95);
+/// Background for inactive tab in simplified mode (dark gray)
+const SIMPLE_TAB_BG_INACTIVE: Color = (50, 50, 56);
 /// Background for flash in simplified mode
-const SIMPLE_FLASH_BG: Color = (90, 90, 35);
+const SIMPLE_FLASH_BG: Color = (100, 90, 30);
 
 fn render_tabs_simplified(
     state: &mut State,
@@ -547,6 +547,11 @@ fn render_tabs_simplified(
         })
         .collect();
 
+    // Auto-scroll to keep the active tab visible (unless user manually scrolled)
+    let active_idx = tabs.iter().position(|t| t.active).unwrap_or(0);
+    if !state.manual_scroll && state.tab_scroll_offset > active_idx {
+        state.tab_scroll_offset = active_idx;
+    }
     // Clamp scroll offset
     let offset = state.tab_scroll_offset.min(count.saturating_sub(1));
     let has_left = offset > 0;
@@ -554,8 +559,8 @@ fn render_tabs_simplified(
     // Render left arrow if needed
     if has_left {
         let arrow_start = *col;
-        let _ = write!(buf, "{bar_bg_str} {}◀ ", fg(180, 175, 195));
-        *col += 4; // " ◀ " = space + arrow + space + space? Let me be precise: " ◀ " = 4 chars
+        let _ = write!(buf, "{bar_bg_str} {}<< ", fg(200, 195, 210));
+        *col += 4; // " << "
         state.nav_arrows.push(NavArrow {
             start_col: arrow_start,
             end_col: *col,
@@ -569,13 +574,6 @@ fn render_tabs_simplified(
     // Render tabs starting from offset, tracking if we ran out of space
     let mut rendered_up_to = count; // will be set if we overflow
     for (i, tab) in tabs.iter().enumerate().skip(offset) {
-        // Reserve space for right arrow (4 chars) + separator (1 char) if not last tab
-        let reserve = if i + 1 < count { 5 } else { 0 };
-        if *col + 6 + reserve > cols {
-            rendered_up_to = i;
-            break;
-        }
-
         let session = best_sessions[i];
         let is_active = tab.active;
         let tab_name = &tab.name;
@@ -589,6 +587,20 @@ fn render_tabs_simplified(
         } else {
             tab_name.to_string()
         };
+
+        // Estimate this tab's width: space + symbol + space + name + space + separator
+        let has_claude = session.is_some();
+        let tab_width = if has_claude {
+            1 + 1 + 1 + display_width(&truncated) + 1 + 1 // " ● name │"
+        } else {
+            1 + display_width(&truncated) + 1 + 1 // " name │"
+        };
+        // Reserve 4 chars for " >>" arrow if there are more tabs after this
+        let arrow_reserve = if i + 1 < count { 4 } else { 0 };
+        if *col + tab_width + arrow_reserve > cols {
+            rendered_up_to = i;
+            break;
+        }
 
         // Check flash
         let is_flash = state
@@ -694,15 +706,21 @@ fn render_tabs_simplified(
         simple_sep(buf, col);
     }
 
+    // If active tab was not rendered (overflowed to the right), adjust offset
+    // (unless user manually scrolled)
+    if !state.manual_scroll && active_idx >= rendered_up_to && rendered_up_to < count {
+        state.tab_scroll_offset = active_idx.saturating_sub(rendered_up_to.saturating_sub(offset).saturating_sub(1));
+    }
+
     // Render right arrow if there are more tabs
     let has_right = rendered_up_to < count;
     if has_right {
         let arrow_start = *col;
-        let _ = write!(buf, "{bar_bg_str} {}▶", fg(180, 175, 195));
-        *col += 2;
+        let _ = write!(buf, "{bar_bg_str} {}>>", fg(200, 195, 210));
+        *col += 3; // " >>"
         state.nav_arrows.push(NavArrow {
             start_col: arrow_start,
-            end_col: *col + 1,
+            end_col: *col,
             direction: NavDirection::Right,
         });
     }

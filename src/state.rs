@@ -181,4 +181,6 @@ pub struct State {
     pub simplified_ui_from_config: bool,
     /// Scroll offset for tab overflow navigation
     pub tab_scroll_offset: usize,
+    /// When true, skip auto-scroll to active tab (user manually scrolled)
+    pub manual_scroll: bool,
 }
