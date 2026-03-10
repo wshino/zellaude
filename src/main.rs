@@ -15,7 +15,13 @@ const FLASH_TICK: f64 = 0.25;
 register_plugin!(State);
 
 impl ZellijPlugin for State {
-    fn load(&mut self, _configuration: BTreeMap<String, String>) {
+    fn load(&mut self, configuration: BTreeMap<String, String>) {
+        // Read simplified_ui option from layout configuration
+        if let Some(val) = configuration.get("simplified_ui") {
+            self.settings.simplified_ui = val == "true";
+            self.simplified_ui_from_config = true;
+        }
+
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
@@ -51,6 +57,11 @@ impl ZellijPlugin for State {
                 }
                 self.active_tab_index = new_active;
                 self.tabs = tabs;
+                // Clamp scroll offset
+                let max_offset = self.tabs.len().saturating_sub(1);
+                if self.tab_scroll_offset > max_offset {
+                    self.tab_scroll_offset = max_offset;
+                }
                 self.rebuild_pane_map();
                 true
             }
@@ -82,6 +93,21 @@ impl ZellijPlugin for State {
 
                 match self.view_mode {
                     ViewMode::Normal => {
+                        // Check nav arrows first
+                        for arrow in &self.nav_arrows {
+                            if col >= arrow.start_col && col < arrow.end_col {
+                                match arrow.direction {
+                                    state::NavDirection::Left => {
+                                        self.tab_scroll_offset =
+                                            self.tab_scroll_offset.saturating_sub(1);
+                                    }
+                                    state::NavDirection::Right => {
+                                        self.tab_scroll_offset += 1;
+                                    }
+                                }
+                                return true;
+                            }
+                        }
                         for region in &self.click_regions {
                             if col >= region.start_col && col < region.end_col {
                                 if region.is_waiting {
@@ -112,9 +138,14 @@ impl ZellijPlugin for State {
                                                 self.settings.elapsed_time =
                                                     !self.settings.elapsed_time;
                                             }
+                                            state::SettingKey::SimplifiedUi => {
+                                                self.settings.simplified_ui =
+                                                    !self.settings.simplified_ui;
+                                            }
                                         }
                                         self.save_config();
                                     }
+                                    MenuAction::ScrollTabsLeft | MenuAction::ScrollTabsRight => {}
                                     MenuAction::CloseMenu => {
                                         self.view_mode = ViewMode::Normal;
                                     }
@@ -130,7 +161,11 @@ impl ZellijPlugin for State {
                 match context.get("type").map(|s| s.as_str()) {
                     Some("load_config") if exit_code == Some(0) => {
                         let raw = String::from_utf8_lossy(&stdout);
-                        if let Ok(settings) = serde_json::from_str::<Settings>(raw.trim()) {
+                        if let Ok(mut settings) = serde_json::from_str::<Settings>(raw.trim()) {
+                            // Layout configuration takes precedence over persisted setting
+                            if self.simplified_ui_from_config {
+                                settings.simplified_ui = self.settings.simplified_ui;
+                            }
                             self.settings = settings;
                         }
                         self.config_loaded = true;

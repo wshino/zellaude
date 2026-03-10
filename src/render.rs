@@ -1,6 +1,6 @@
 use crate::state::{
     unix_now, unix_now_ms, Activity, ClickRegion, FlashMode, MenuAction, MenuClickRegion,
-    NotifyMode, SessionInfo, SettingKey, State, ViewMode,
+    NavArrow, NavDirection, NotifyMode, SessionInfo, SettingKey, State, ViewMode,
 };
 use std::fmt::Write;
 use std::io::Write as IoWrite;
@@ -66,7 +66,8 @@ fn display_width(s: &str) -> usize {
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
 const ELAPSED_THRESHOLD: u64 = 30;
-const SEPARATOR: &str = "\u{e0b0}";
+const SEPARATOR_POWERLINE: &str = "\u{e0b0}";
+const SEPARATOR_SIMPLE: &str = "│";
 
 type Color = (u8, u8, u8);
 const BAR_BG: Color = (30, 30, 46);
@@ -80,9 +81,19 @@ const FLASH_BG_BRIGHT: Color = (80, 80, 30);
 fn arrow(buf: &mut String, col: &mut usize, from: Color, to: Color) {
     let _ = write!(
         buf,
-        "{}{}{SEPARATOR}",
+        "{}{}{SEPARATOR_POWERLINE}",
         fg(from.0, from.1, from.2),
         bg(to.0, to.1, to.2),
+    );
+    *col += 1;
+}
+
+/// Write a simple separator for simplified UI mode.
+fn simple_sep(buf: &mut String, col: &mut usize) {
+    let _ = write!(
+        buf,
+        "{}{SEPARATOR_SIMPLE}",
+        fg(100, 100, 120),
     );
     *col += 1;
 }
@@ -119,7 +130,9 @@ fn mode_style(mode: InputMode) -> (Color, &'static str) {
 pub fn render_status_bar(state: &mut State, _rows: usize, cols: usize) {
     state.click_regions.clear();
     state.menu_click_regions.clear();
+    state.nav_arrows.clear();
 
+    let simplified = state.settings.simplified_ui;
     let mut buf = String::with_capacity(cols * 4);
     // Terminal setup for a 1-row status bar:
     //  \x1b[H     — cursor home (prevent scroll from cursor at end-of-line)
@@ -155,7 +168,24 @@ pub fn render_status_bar(state: &mut State, _rows: usize, cols: usize) {
 
     // Render prefix segment (truncate if wider than cols)
     let mut col;
-    if total_prefix_width <= cols {
+    if simplified {
+        // Simplified UI: flat style without powerline backgrounds
+        let _ = write!(
+            buf,
+            "{bar_bg_str}{}{BOLD}{prefix_text}{RESET}{bar_bg_str}",
+            fg(180, 175, 195),
+        );
+        col = prefix_width;
+        if col + mode_pill_width <= cols {
+            let (mode_color, _) = mode_style(state.input_mode);
+            let _ = write!(
+                buf,
+                "{}{BOLD} {mode_text} {RESET}{bar_bg_str}",
+                fg(mode_color.0, mode_color.1, mode_color.2),
+            );
+            col += mode_pill_width;
+        }
+    } else if total_prefix_width <= cols {
         let _ = write!(
             buf,
             "{}{}{BOLD}{prefix_text}{RESET}",
@@ -198,11 +228,20 @@ pub fn render_status_bar(state: &mut State, _rows: usize, cols: usize) {
     if col < cols {
         match state.view_mode {
             ViewMode::Normal => {
-                render_tabs(state, &mut buf, &mut col, cols, last_prefix_bg, prefix_used);
+                if simplified {
+                    render_tabs_simplified(state, &mut buf, &mut col, cols);
+                } else {
+                    render_tabs(state, &mut buf, &mut col, cols, last_prefix_bg, prefix_used);
+                }
             }
             ViewMode::Settings => {
-                arrow(&mut buf, &mut col, last_prefix_bg, BAR_BG);
-                let _ = write!(buf, "{bar_bg_str}");
+                if simplified {
+                    simple_sep(&mut buf, &mut col);
+                    let _ = write!(buf, "{bar_bg_str}");
+                } else {
+                    arrow(&mut buf, &mut col, last_prefix_bg, BAR_BG);
+                    let _ = write!(buf, "{bar_bg_str}");
+                }
                 render_settings_menu(state, &mut buf, &mut col);
             }
         }
@@ -452,6 +491,223 @@ fn render_tabs(
     }
 }
 
+/// Background for active tab in simplified mode (green tint)
+const SIMPLE_TAB_BG_ACTIVE: Color = (30, 65, 45);
+/// Background for inactive tab in simplified mode (subtle green)
+const SIMPLE_TAB_BG_INACTIVE: Color = (20, 38, 28);
+/// Background for flash in simplified mode
+const SIMPLE_FLASH_BG: Color = (90, 90, 35);
+
+fn render_tabs_simplified(
+    state: &mut State,
+    buf: &mut String,
+    col: &mut usize,
+    cols: usize,
+) {
+    let now_s = unix_now();
+    let now_ms = unix_now_ms();
+    let bar_bg_str = bg(BAR_BG.0, BAR_BG.1, BAR_BG.2);
+
+    let mut tabs: Vec<&TabInfo> = state.tabs.iter().collect();
+    tabs.sort_by_key(|t| t.position);
+
+    let count = tabs.len();
+    if count == 0 {
+        simple_sep(buf, col);
+        return;
+    }
+
+    // For each tab, find the best Claude session
+    let best_sessions: Vec<Option<&SessionInfo>> = tabs
+        .iter()
+        .map(|tab| {
+            state
+                .sessions
+                .values()
+                .filter(|s| s.tab_index == Some(tab.position))
+                .max_by_key(|s| activity_priority(&s.activity))
+        })
+        .collect();
+
+    // Elapsed strings
+    let elapsed_strs: Vec<Option<String>> = best_sessions
+        .iter()
+        .map(|session| {
+            if !state.settings.elapsed_time {
+                return None;
+            }
+            session.and_then(|s| {
+                let elapsed = now_s.saturating_sub(s.last_event_ts);
+                if elapsed >= ELAPSED_THRESHOLD {
+                    Some(format_elapsed(elapsed))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    // Clamp scroll offset
+    let offset = state.tab_scroll_offset.min(count.saturating_sub(1));
+    let has_left = offset > 0;
+
+    // Render left arrow if needed
+    if has_left {
+        let arrow_start = *col;
+        let _ = write!(buf, "{bar_bg_str} {}◀ ", fg(180, 175, 195));
+        *col += 4; // " ◀ " = space + arrow + space + space? Let me be precise: " ◀ " = 4 chars
+        state.nav_arrows.push(NavArrow {
+            start_col: arrow_start,
+            end_col: *col,
+            direction: NavDirection::Left,
+        });
+    }
+
+    // Leading separator
+    simple_sep(buf, col);
+
+    // Render tabs starting from offset, tracking if we ran out of space
+    let mut rendered_up_to = count; // will be set if we overflow
+    for (i, tab) in tabs.iter().enumerate().skip(offset) {
+        // Reserve space for right arrow (4 chars) + separator (1 char) if not last tab
+        let reserve = if i + 1 < count { 5 } else { 0 };
+        if *col + 6 + reserve > cols {
+            rendered_up_to = i;
+            break;
+        }
+
+        let session = best_sessions[i];
+        let is_active = tab.active;
+        let tab_name = &tab.name;
+
+        // Truncate name
+        let max_name_len = 20usize;
+        let char_count = tab_name.chars().count();
+        let truncated = if char_count > max_name_len {
+            let s: String = tab_name.chars().take(max_name_len.saturating_sub(1)).collect();
+            format!("{s}…")
+        } else {
+            tab_name.to_string()
+        };
+
+        // Check flash
+        let is_flash = state
+            .sessions
+            .values()
+            .filter(|s| s.tab_index == Some(tab.position))
+            .any(|s| {
+                state
+                    .flash_deadlines
+                    .get(&s.pane_id)
+                    .map(|&deadline| now_ms < deadline && (now_ms / 250) % 2 == 0)
+                    .unwrap_or(false)
+            });
+
+        // Pick tab background
+        let tab_bg = if is_flash {
+            SIMPLE_FLASH_BG
+        } else if is_active {
+            SIMPLE_TAB_BG_ACTIVE
+        } else {
+            SIMPLE_TAB_BG_INACTIVE
+        };
+        let tab_bg_str = bg(tab_bg.0, tab_bg.1, tab_bg.2);
+
+        let region_start = *col;
+
+        // Leading space
+        let _ = write!(buf, "{tab_bg_str} ");
+        *col += 1;
+
+        if let Some(s) = session {
+            let style = activity_style(&s.activity);
+
+            // Symbol color
+            let sym_fg = if is_flash {
+                fg(255, 255, 80)
+            } else {
+                fg(style.r, style.g, style.b)
+            };
+
+            // Name color
+            let name_fg = if is_flash {
+                fg(255, 255, 80)
+            } else if is_active {
+                fg(255, 255, 255)
+            } else {
+                fg(160, 155, 175)
+            };
+
+            // Symbol
+            let _ = write!(buf, "{sym_fg}{}", style.symbol);
+            *col += display_width(style.symbol);
+
+            // Space + name
+            if !truncated.is_empty() {
+                let bold_str = if is_active { BOLD } else { "" };
+                let _ = write!(buf, " {bold_str}{name_fg}{truncated}{RESET}{tab_bg_str}");
+                *col += 1 + display_width(&truncated);
+            }
+
+            // Elapsed suffix
+            if let Some(ref es) = elapsed_strs[i] {
+                if *col + 1 + es.len() + 1 < cols {
+                    let _ = write!(buf, " {}{es}", fg(120, 115, 135));
+                    *col += 1 + es.len();
+                }
+            }
+        } else {
+            // Non-Claude tab
+            let name_fg = if is_active {
+                fg(220, 215, 230)
+            } else {
+                fg(120, 115, 135)
+            };
+            let bold_str = if is_active { BOLD } else { "" };
+            let _ = write!(buf, "{bold_str}{name_fg}{truncated}{RESET}{tab_bg_str}");
+            *col += display_width(&truncated);
+        }
+
+        // Trailing space
+        let _ = write!(buf, " ");
+        *col += 1;
+
+        // Reset to bar background after tab
+        let _ = write!(buf, "{bar_bg_str}");
+
+        // Click region
+        let waiting_session = state
+            .sessions
+            .values()
+            .filter(|s| s.tab_index == Some(tab.position))
+            .find(|s| matches!(s.activity, Activity::Waiting));
+
+        state.click_regions.push(ClickRegion {
+            start_col: region_start,
+            end_col: *col,
+            tab_index: tab.position,
+            pane_id: waiting_session.map_or(0, |s| s.pane_id),
+            is_waiting: waiting_session.is_some(),
+        });
+
+        // Separator between tabs
+        simple_sep(buf, col);
+    }
+
+    // Render right arrow if there are more tabs
+    let has_right = rendered_up_to < count;
+    if has_right {
+        let arrow_start = *col;
+        let _ = write!(buf, "{bar_bg_str} {}▶", fg(180, 175, 195));
+        *col += 2;
+        state.nav_arrows.push(NavArrow {
+            start_col: arrow_start,
+            end_col: *col + 1,
+            direction: NavDirection::Right,
+        });
+    }
+}
+
 fn notify_mode_label(mode: NotifyMode) -> (&'static str, &'static str, String, String) {
     match mode {
         NotifyMode::Always => ("●", "Notify: always", fg(80, 200, 120), fg(255, 255, 255)),
@@ -534,6 +790,23 @@ fn render_settings_menu(state: &mut State, buf: &mut String, col: &mut usize) {
         render_tristate(
             buf, col, &mut state.menu_click_regions,
             SettingKey::ElapsedTime, symbol, label, &sym_color, &label_color,
+        );
+    }
+
+    // --- Simplified UI (bool) ---
+    {
+        let _ = write!(buf, "  ");
+        *col += 2;
+        let enabled = state.settings.simplified_ui;
+        let (symbol, sym_color, label_color) = if enabled {
+            ("●", fg(80, 200, 120), fg(255, 255, 255))
+        } else {
+            ("○", fg(100, 100, 100), fg(100, 100, 100))
+        };
+        let label = if enabled { "Simple UI: on" } else { "Simple UI: off" };
+        render_tristate(
+            buf, col, &mut state.menu_click_regions,
+            SettingKey::SimplifiedUi, symbol, label, &sym_color, &label_color,
         );
     }
 

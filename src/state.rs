@@ -62,6 +62,17 @@ pub struct ClickRegion {
     pub is_waiting: bool,
 }
 
+pub struct NavArrow {
+    pub start_col: usize,
+    pub end_col: usize,
+    pub direction: NavDirection,
+}
+
+pub enum NavDirection {
+    Left,
+    Right,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum NotifyMode {
     Never,
@@ -104,6 +115,7 @@ pub struct Settings {
     pub notifications: NotifyMode,
     pub flash: FlashMode,
     pub elapsed_time: bool,
+    pub simplified_ui: bool,
 }
 
 impl Default for Settings {
@@ -112,6 +124,7 @@ impl Default for Settings {
             notifications: NotifyMode::Always,
             flash: FlashMode::Once,
             elapsed_time: true,
+            simplified_ui: false,
         }
     }
 }
@@ -128,11 +141,14 @@ pub enum SettingKey {
     Notifications,
     Flash,
     ElapsedTime,
+    SimplifiedUi,
 }
 
 pub enum MenuAction {
     ToggleSetting(SettingKey),
     CloseMenu,
+    ScrollTabsLeft,
+    ScrollTabsRight,
 }
 
 pub struct MenuClickRegion {
@@ -149,6 +165,7 @@ pub struct State {
     pub pane_manifest: Option<PaneManifest>,
     pub active_tab_index: Option<usize>,
     pub click_regions: Vec<ClickRegion>,
+    pub nav_arrows: Vec<NavArrow>,
     /// pane_id -> flash deadline in ms (for waiting animation)
     pub flash_deadlines: HashMap<u32, u64>,
     pub zellij_session_name: Option<String>,
@@ -160,4 +177,8 @@ pub struct State {
     pub menu_click_regions: Vec<MenuClickRegion>,
     pub config_loaded: bool,
     pub hooks_installed: bool,
+    /// Whether simplified_ui was set from layout configuration (overrides persisted setting)
+    pub simplified_ui_from_config: bool,
+    /// Scroll offset for tab overflow navigation
+    pub tab_scroll_offset: usize,
 }
